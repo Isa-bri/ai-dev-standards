@@ -142,3 +142,45 @@ generated or vendored files (lockfiles, generated types, build output,
 `node_modules`). Don't re-read what you just edited. Run the full
 verification once, at the end, not after every small edit. Don't paste a
 large diff into a response — say what changed and where.
+
+## Token minmax
+
+Apply these measures to avoid context bloat:
+
+### Code Graph Context (CGC)
+
+Use CGC for symbol-level structural querying rather than bulk text reading.
+It provides precise subgraphs (callers, callees, definitions) instead of
+raw file text, often saving 10-100x tokens on navigation.
+
+### Path-scoped instructions (`applyTo`)
+
+Do not put language/framework rules in this global file. Use separate
+`.instructions.md` files (e.g., `frontend.instructions.md`) in the
+`.github/instructions/` directory with an `applyTo` glob:
+
+```markdown
+---
+applyTo:
+  - webapp/src/**
+---
+```
+Only load rules when matching files are active.
+
+### GitHub Content Exclusion
+
+Configure Content Exclusion in GitHub Enterprise / Org settings to globally
+block Copilot from seeing large or sensitive paths:
+- `node_modules/**`, `dist/**`, `build/**`
+- `*.lock`, `*.lockb`
+- `**/*.snap`, `**/*.tsbuildinfo`
+- Media assets, fonts, and binaries
+
+### Extreme Budget Minmaxing (IDE Behavior)
+
+If you are operating on a heavily restricted credit budget, context setup is not enough. You must alter how you interact with the IDE:
+
+1. **Disable Automatic Inline Suggestions**: Copilot triggers a completion request on almost every keystroke, draining credits silently in the background. Go to your IDE settings and disable automatic suggestions (`editor.inlineSuggest.enabled = false` in VS Code) or set a long delay. Trigger them manually only when needed (e.g., `Alt+\`).
+2. **Restrict Open Tabs**: Copilot uses all currently open tabs to build its context window. Having 10 files open means 10 files are processed on every chat message. **Keep a maximum of 1 or 2 tabs open** at any time.
+3. **Use Explicit Selection over Whole-File Context**: When using Copilot Chat (or Cmd+I), highlight the exact 5-10 lines of code you want to discuss rather than asking a question with the whole file open. This forces Copilot to prioritize the selection instead of reading the entire file.
+4. **Avoid Open-Ended Chat Conversations**: Start a new chat session (clear history) the moment you switch to a new sub-task. Long chat threads carry their entire history as context on every new prompt, which exponentially burns tokens/credits.
