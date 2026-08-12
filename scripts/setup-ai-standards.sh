@@ -9,9 +9,13 @@
 # every CLAUDE.md / copilot-instructions.md file this script installs.
 #
 # Usage:
-#   ./setup-ai-standards.sh [TARGET_DIR]
+#   ./setup-ai-standards.sh [TARGET_DIR] [OPTIONS]
 #
-#   TARGET_DIR  - path to the repo to set up (default: current directory)
+# Options:
+#   -p, --path <dir>       Path to the repo to set up (default: pwd)
+#   -a, --agent <agent>    AI tool: claude, copilot, or both
+#   -t, --type <type>      Project type: general, web, or mobile
+#   --install-cgc <y/n>    Install Code Graph Context (CGC) for token reduction
 # =============================================================================
 
 set -euo pipefail
@@ -29,13 +33,11 @@ success() { echo -e "${GREEN}[done]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[warn]${RESET}  $*"; }
 
 ask() {
-  # ask <prompt> <varname>
   local prompt="$1" varname="$2"
   read -rp "$(echo -e "${BOLD}${prompt}${RESET} ")" "$varname"
 }
 
 pick() {
-  # pick <prompt> <options...>  — returns chosen option on stdout
   local prompt="$1"; shift
   local options=("$@")
   echo -e "${BOLD}${prompt}${RESET}"
@@ -55,24 +57,49 @@ pick() {
   done
 }
 
-# --------------- locate this script's repo -----------------------------------
+# --------------- argument parsing --------------------------------------------
 
-STANDARDS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET=""
+PROJECT_TYPE=""
+AI_TOOLS=""
+INSTALL_CGC=""
 
-if [[ ! -f "$STANDARDS_DIR/general/CLAUDE.md" ]]; then
-  echo "ERROR: Cannot find general/CLAUDE.md relative to this script."
-  echo "       Run this script from inside the ai-dev-standards repo."
-  exit 1
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -p|--path) TARGET="$2"; shift 2 ;;
+    -a|--agent) AI_TOOLS="$2"; shift 2 ;;
+    -t|--type) PROJECT_TYPE="$2"; shift 2 ;;
+    --install-cgc) INSTALL_CGC="$2"; shift 2 ;;
+    *) 
+      if [[ -z "$TARGET" ]]; then
+        TARGET="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$TARGET" ]]; then
+  TARGET="$(pwd)"
 fi
 
-# --------------- target directory --------------------------------------------
-
-TARGET="${1:-$(pwd)}"
 if [[ ! -d "$TARGET" ]]; then
   echo "ERROR: Target directory '$TARGET' does not exist."
   exit 1
 fi
 TARGET="$(cd "$TARGET" && pwd)"
+
+# --------------- locate this script's repo -----------------------------------
+
+STANDARDS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ ! -f "$STANDARDS_DIR/general/CLAUDE.md" ]]; then
+  echo "ERROR: Cannot find general/CLAUDE.md relative to this script."
+  echo "       Run this script from inside the ai-dev-standards repo."
+  exit 1
+fi
 
 echo ""
 echo -e "${BOLD}━━━ AI Dev Standards Setup ━━━${RESET}"
@@ -81,33 +108,36 @@ info "Standards source : $STANDARDS_DIR"
 info "Target repo      : $TARGET"
 echo ""
 
-# --------------- project type ------------------------------------------------
+# --------------- project type & AI tooling -----------------------------------
 
-PROJECT_TYPE="$(pick "What type of project is this?" \
-  "general  (no platform-specific rules)" \
-  "web      (pnpm workspaces / Tailwind)" \
-  "mobile   (React Native / Expo)")"
+if [[ -z "$PROJECT_TYPE" ]]; then
+  PROJECT_TYPE="$(pick "What type of project is this?" \
+    "general  (no platform-specific rules)" \
+    "web      (pnpm workspaces / Tailwind)" \
+    "mobile   (React Native / Expo)")"
+  PROJECT_TYPE="${PROJECT_TYPE%% *}"
+fi
 
-PROJECT_TYPE="${PROJECT_TYPE%% *}"   # strip description, keep first word
+if [[ -z "$AI_TOOLS" ]]; then
+  AI_TOOLS="$(pick "Which AI tool(s) do you want to configure?" \
+    "claude   (Claude Code — copies CLAUDE.md + .claude/agents/)" \
+    "copilot  (GitHub Copilot — copies .github/copilot-instructions.md + agents)" \
+    "both     (install both)")"
+  AI_TOOLS="${AI_TOOLS%% *}"
+fi
 
-# --------------- AI tooling --------------------------------------------------
+# --------------- copy / append functions -------------------------------------
 
-AI_TOOLS="$(pick "Which AI tool(s) do you want to configure?" \
-  "claude   (Claude Code — copies CLAUDE.md + .claude/agents/)" \
-  "copilot  (GitHub Copilot — copies .github/copilot-instructions.md + agents)" \
-  "both     (install both)")"
-
-AI_TOOLS="${AI_TOOLS%% *}"
-
-# --------------- copy functions ----------------------------------------------
-
-copy_file() {
-  # copy_file <src> <dst>
+copy_or_append_file() {
   local src="$1" dst="$2"
   local dst_dir; dst_dir="$(dirname "$dst")"
   mkdir -p "$dst_dir"
   if [[ -f "$dst" ]]; then
-    warn "Already exists, skipping: ${dst#"$TARGET/"}"
+    warn "File already exists: ${dst#"$TARGET/"}"
+    info "Appending standard rules to existing file..."
+    echo -e "\n\n<!-- APPENDED BY AI DEV STANDARDS -->\n" >> "$dst"
+    cat "$src" >> "$dst"
+    success "Appended → ${dst#"$TARGET/"}"
   else
     cp "$src" "$dst"
     success "Copied → ${dst#"$TARGET/"}"
@@ -115,14 +145,48 @@ copy_file() {
 }
 
 copy_dir() {
-  # copy_dir <src_dir> <dst_dir>
   local src_dir="$1" dst_dir="$2"
   mkdir -p "$dst_dir"
   for f in "$src_dir"/*.md; do
     [[ -e "$f" ]] || continue
     local fname; fname="$(basename "$f")"
-    copy_file "$f" "$dst_dir/$fname"
+    copy_or_append_file "$f" "$dst_dir/$fname"
   done
+}
+
+# --------------- OS and CGC Install ------------------------------------------
+
+setup_cgc() {
+  echo ""
+  info "─── Token Optimization Setup ───"
+  
+  # Basic OS detection
+  OS="$(uname -s)"
+  info "Detected OS: $OS"
+
+  if ! command -v npm &> /dev/null; then
+    warn "npm is not installed. Code Graph Context (CGC) requires Node.js."
+    return
+  fi
+
+  if [[ -z "$INSTALL_CGC" ]]; then
+    read -rp "$(echo -e "${BOLD}Do you want to install Code Graph Context (CGC) for extreme token optimization? (y/n): ${RESET}")" INSTALL_CGC
+  fi
+
+  if [[ "$INSTALL_CGC" =~ ^[Yy] ]]; then
+    info "Installing @codegraphcontext/cli globally..."
+    npm install -g @codegraphcontext/cli
+    
+    info "Indexing target repository ($TARGET)..."
+    (cd "$TARGET" && cgc index)
+    
+    info "Setting up MCP server..."
+    cgc mcp setup
+    
+    success "CGC Installed and configured."
+  else
+    info "Skipping CGC installation."
+  fi
 }
 
 # --------------- install Claude Code files -----------------------------------
@@ -131,18 +195,18 @@ install_claude() {
   echo ""
   info "─── Installing Claude Code files ───"
 
-  copy_file "$STANDARDS_DIR/general/CLAUDE.md" "$TARGET/CLAUDE.md"
+  copy_or_append_file "$STANDARDS_DIR/general/CLAUDE.md" "$TARGET/CLAUDE.md"
   copy_dir  "$STANDARDS_DIR/general/agents"    "$TARGET/.claude/agents"
 
   if [[ "$PROJECT_TYPE" == "mobile" ]]; then
-    copy_file "$STANDARDS_DIR/mobile/RULES.md" "$TARGET/docs/mobile-rules.md"
-    copy_file "$STANDARDS_DIR/mobile/agents/device-qa.md" \
+    copy_or_append_file "$STANDARDS_DIR/mobile/RULES.md" "$TARGET/docs/mobile-rules.md"
+    copy_or_append_file "$STANDARDS_DIR/mobile/agents/device-qa.md" \
               "$TARGET/.claude/agents/device-qa.md"
     info "Remember to add 'See docs/mobile-rules.md' to CLAUDE.md"
   fi
 
   if [[ "$PROJECT_TYPE" == "web" ]]; then
-    copy_file "$STANDARDS_DIR/web/RULES.md" "$TARGET/docs/web-rules.md"
+    copy_or_append_file "$STANDARDS_DIR/web/RULES.md" "$TARGET/docs/web-rules.md"
     info "Remember to add 'See docs/web-rules.md' to CLAUDE.md"
   fi
 }
@@ -153,20 +217,20 @@ install_copilot() {
   echo ""
   info "─── Installing GitHub Copilot files ───"
 
-  copy_file "$STANDARDS_DIR/copilot/copilot-instructions.md" \
+  copy_or_append_file "$STANDARDS_DIR/copilot/copilot-instructions.md" \
             "$TARGET/.github/copilot-instructions.md"
 
   copy_dir  "$STANDARDS_DIR/copilot/agents" \
             "$TARGET/.github/agents"
 
   if [[ "$PROJECT_TYPE" == "mobile" ]]; then
-    copy_file "$STANDARDS_DIR/copilot/instructions/mobile.instructions.md" \
+    copy_or_append_file "$STANDARDS_DIR/copilot/instructions/mobile.instructions.md" \
               "$TARGET/.github/instructions/mobile.instructions.md"
     info "Add '# files: **/*.{ts,tsx}' applyTo glob to mobile.instructions.md if needed"
   fi
 
   if [[ "$PROJECT_TYPE" == "web" ]]; then
-    copy_file "$STANDARDS_DIR/copilot/instructions/web.instructions.md" \
+    copy_or_append_file "$STANDARDS_DIR/copilot/instructions/web.instructions.md" \
               "$TARGET/.github/instructions/web.instructions.md"
   fi
 
@@ -223,6 +287,8 @@ EOF
 }
 
 # --------------- run ---------------------------------------------------------
+
+setup_cgc
 
 case "$AI_TOOLS" in
   claude)  install_claude ;;
