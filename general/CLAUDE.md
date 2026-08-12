@@ -166,3 +166,131 @@ doesn't fit:
   not a pile of file contents.
 - Don't paste a large diff into a response; say what changed and where.
 - Run the full verification once, at the end, not after every small edit.
+
+## Token minmax
+
+This section documents the additional measures layered on top of context
+discipline for extreme token reduction. Apply all of them — they compound.
+
+### .claudeignore — exclude noise at the source
+
+A `.claudeignore` (same syntax as `.gitignore`) tells Claude which paths it
+must never read. Create one at the repo root and seed it with:
+
+```
+# generated / vendored
+node_modules/
+.pnp/
+dist/
+build/
+out/
+.next/
+.expo/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# lockfiles (agent must not read, not edit)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+
+# binary / media assets
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.svg
+*.ico
+*.mp4
+*.mov
+*.pdf
+*.woff
+*.woff2
+
+# IDE / OS artefacts
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# secrets
+.env
+.env.*
+!.env.example
+```
+
+Extend this list with any generated schema files, migration snapshots, or
+large fixture directories specific to this project.
+
+### Code Graph Context (CGC) — symbol-level retrieval via MCP
+
+Instead of reading whole files, the agent queries a persistent call-graph
+index and gets back only the relevant subgraph: a function signature, its
+callers, its callees, and the types it uses. Benchmarks show 11–120× fewer
+tokens consumed compared with file-level or grep-level retrieval.
+
+**Setup (one-time per machine):**
+
+```bash
+npm install -g @codegraphcontext/cli    # or: brew install cgc
+cgc index                               # index the current repo
+cgc mcp setup                           # registers the MCP server in ~/.claude.json
+```
+
+**Verify in a Claude Code session:**
+
+```
+/mcp                                    # should list "codegraphcontext"
+```
+
+**When to prefer CGC over grep/glob:**
+
+- "What calls `foo()`?" → CGC's `callers` query, not a grep loop.
+- "What does `UserService` depend on?" → CGC's `dependencies` query.
+- "Where is `PaymentRecord` constructed?" → CGC's `usages` query.
+
+Reserve raw file reads for files with no parseable symbols (config, prose,
+SQL migrations).
+
+### Prompt caching — pay once for stable context
+
+Anthropic's prompt cache reuses previously computed KV blocks. The CLAUDE.md
+you are reading is a prime candidate because it is the same every session.
+When calling the API directly (not through Claude Code), prefix the system
+prompt with the `cache_control: {"type": "ephemeral"}` block immediately
+after the last stable section. Claude Code enables this automatically for
+CLAUDE.md content.
+
+For long-running agentic tasks: keep all invariant text (this file, the
+architecture section) at the **top** of the context; put the task and
+tool results at the **bottom**. This matches the model's U-shaped recall
+curve (strongest at the start and end of the window) and maximises cache
+hit rate.
+
+### Scoped context — don't load what isn't relevant
+
+Only provide the agent with context it will actually use for the task at
+hand. Practical rules:
+
+- Give the agent a `--files` flag (or equivalent) naming only the files
+  relevant to the task rather than opening the whole workspace.
+- When spawning subagents for broad searches, have them return a one-line
+  conclusion and a file path, not a dump of file contents.
+- For test-only tasks, include test files and the modules under test; exclude
+  everything else.
+
+### Minification of tool outputs
+
+Before handing large tool outputs (test run logs, build output, linter
+reports) back to the model, strip them:
+
+- Remove ANSI escape codes.
+- Truncate duplicate stack-frame lines (keep first + last).
+- Summarise passing-test blocks to a single "N tests passed" line.
+- Strip timestamps and PID prefixes from log lines.
+
+If a CI log is longer than ~500 lines, have a subagent summarise it to the
+count and types of failures before including it in the main context.
