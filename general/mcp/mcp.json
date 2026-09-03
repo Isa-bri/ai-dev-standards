@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "codegraphcontext": {
+      "command": "cgc",
+      "args": ["mcp", "start"],
+      "env": {
+        "CGC_OUTPUT_FORMAT": "gcf"
+      }
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.79", "--browser", "chromium"],
+      "env": {}
+    },
+    "git": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@cyanheads/git-mcp-server"],
+      "env": {}
+    },
+    "tree-sitter": {
+      "type": "stdio",
+      "command": "pipx",
+      "args": ["run", "--pip-args=mcp<2.0.0", "mcp-server-tree-sitter"],
+      "env": {}
+    },
+    "memory": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "{{MEMORY_FILE_PATH}}"
+      }
+    },
+    "sequential-thinking": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "env": {}
+    }
+  }
+}

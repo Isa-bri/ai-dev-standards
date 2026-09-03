@@ -12,10 +12,20 @@
 #   ./setup-ai-standards.sh [TARGET_DIR] [OPTIONS]
 #
 # Options:
-#   -p, --path <dir>       Path to the repo to set up (default: pwd)
-#   -a, --agent <agent>    AI tool: claude, copilot, or both
-#   -t, --type <type>      Project type: general, web, or mobile
-#   --install-cgc <y/n>    Install Code Graph Context (CGC) for token reduction
+#   -p, --path <dir>            Path to the repo to set up (default: pwd)
+#   -a, --agent <agent>         AI tool: claude, copilot, or both
+#   -t, --type <type>           Project type: general, web, or mobile
+#   --install-cgc <y/n>         Install Code Graph Context (CGC) for token reduction
+#   --mcp <all|none>            MCP servers to add to .mcp.json (default: prompt)
+#   --supabase-project-ref <r>  Include the Supabase MCP server with this ref
+#   --install-mcp-tools <y/n>   Install CLI deps the MCP servers need (tree-sitter)
+#   --js <y/n>                  Also install javascript/ (pnpm/Prettier tooling)
+#
+# .mcp.json and .claude/settings.json are only installed for -a claude|both —
+# they're a Claude Code concept and have no Copilot equivalent.
+#
+# A PowerShell port of this script (setup-ai-standards.ps1, same flags in
+# PascalCase) lives alongside it for Windows.
 # =============================================================================
 
 set -euo pipefail
@@ -63,6 +73,10 @@ TARGET=""
 PROJECT_TYPE=""
 AI_TOOLS=""
 INSTALL_CGC=""
+MCP_MODE=""
+SUPABASE_PROJECT_REF=""
+INSTALL_MCP_TOOLS=""
+IS_JS=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -70,7 +84,11 @@ while [[ $# -gt 0 ]]; do
     -a|--agent) AI_TOOLS="$2"; shift 2 ;;
     -t|--type) PROJECT_TYPE="$2"; shift 2 ;;
     --install-cgc) INSTALL_CGC="$2"; shift 2 ;;
-    *) 
+    --mcp) MCP_MODE="$2"; shift 2 ;;
+    --supabase-project-ref) SUPABASE_PROJECT_REF="$2"; shift 2 ;;
+    --install-mcp-tools) INSTALL_MCP_TOOLS="$2"; shift 2 ;;
+    --js) IS_JS="$2"; shift 2 ;;
+    *)
       if [[ -z "$TARGET" ]]; then
         TARGET="$1"
       else
@@ -126,6 +144,10 @@ if [[ -z "$AI_TOOLS" ]]; then
   AI_TOOLS="${AI_TOOLS%% *}"
 fi
 
+if [[ -z "$IS_JS" ]]; then
+  read -rp "$(echo -e "${BOLD}Is this a Node/pnpm (JS or TypeScript) project? (y/n): ${RESET}")" IS_JS
+fi
+
 # --------------- copy / append functions -------------------------------------
 
 copy_or_append_file() {
@@ -154,12 +176,12 @@ copy_dir() {
   done
 }
 
-# --------------- OS and CGC Install ------------------------------------------
+# --------------- OS and MCP tool dependency install ---------------------------
 
-setup_cgc() {
+install_mcp_tool_deps() {
   echo ""
   info "─── Token Optimization Setup ───"
-  
+
   # Basic OS detection
   OS="$(uname -s)"
   info "Detected OS: $OS"
@@ -176,16 +198,40 @@ setup_cgc() {
   if [[ "$INSTALL_CGC" =~ ^[Yy] ]]; then
     info "Installing @codegraphcontext/cli globally..."
     npm install -g @codegraphcontext/cli
-    
+
     info "Indexing target repository ($TARGET)..."
     (cd "$TARGET" && cgc index)
-    
+
     info "Setting up MCP server..."
     cgc mcp setup
-    
+
     success "CGC Installed and configured."
   else
     info "Skipping CGC installation."
+  fi
+
+  # The tree-sitter MCP server also needs a CLI dependency (pipx); the other
+  # npx-based servers (playwright, git, memory, sequential-thinking) are
+  # fetched lazily by Claude Code on first connection and need nothing here.
+  if [[ "$MCP_MODE" == "none" ]]; then
+    return
+  fi
+
+  if [[ -z "$INSTALL_MCP_TOOLS" ]]; then
+    read -rp "$(echo -e "${BOLD}Install the tree-sitter MCP server's CLI dependency via pipx now? (y/n): ${RESET}")" INSTALL_MCP_TOOLS
+  fi
+
+  if [[ "$INSTALL_MCP_TOOLS" =~ ^[Yy] ]]; then
+    if ! command -v pipx &> /dev/null; then
+      warn "pipx is not installed — skipping tree-sitter MCP server setup."
+      warn "Install pipx, then run: pipx install mcp-server-tree-sitter"
+    else
+      info "Installing mcp-server-tree-sitter via pipx..."
+      pipx install mcp-server-tree-sitter || warn "pipx install failed — the server will still work via 'pipx run' on first use."
+      success "tree-sitter MCP dependency installed."
+    fi
+  else
+    info "Skipping MCP tool dependency install (npx-based servers still work on first use)."
   fi
 }
 
@@ -208,6 +254,160 @@ install_claude() {
   if [[ "$PROJECT_TYPE" == "web" ]]; then
     copy_or_append_file "$STANDARDS_DIR/web/RULES.md" "$TARGET/docs/web-rules.md"
     info "Remember to add 'See docs/web-rules.md' to CLAUDE.md"
+  fi
+}
+
+# --------------- install .claude/settings.json + hooks (JS/pnpm only) --------
+
+install_javascript() {
+  echo ""
+  info "─── Installing javascript/ (pnpm/Prettier tooling) ───"
+
+  mkdir -p "$TARGET/.claude/hooks"
+  cp "$STANDARDS_DIR/javascript/claude-settings/hooks/format-edited.sh" \
+     "$TARGET/.claude/hooks/format-edited.sh"
+  chmod +x "$TARGET/.claude/hooks/format-edited.sh"
+  success "Copied → .claude/hooks/format-edited.sh"
+
+  local src="$STANDARDS_DIR/javascript/claude-settings/settings.json"
+  local dst="$TARGET/.claude/settings.json"
+
+  if [[ ! -f "$dst" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+    success "Copied → .claude/settings.json"
+    return
+  fi
+
+  if ! command -v jq &> /dev/null; then
+    warn ".claude/settings.json already exists and jq is not installed — skipping merge."
+    warn "Merge $src into $dst by hand (permissions.allow/deny, hooks.PostToolUse)."
+    return
+  fi
+
+  jq -s '
+    .[0] as $existing | .[1] as $new |
+    $existing
+    | .permissions.allow = (($existing.permissions.allow // []) + ($new.permissions.allow // []) | unique)
+    | .permissions.deny  = (($existing.permissions.deny  // []) + ($new.permissions.deny  // []) | unique)
+    | .hooks.PostToolUse  = (($existing.hooks.PostToolUse // []) as $existingHooks
+        | ($new.hooks.PostToolUse // []) as $newHooks
+        | $existingHooks + [ $newHooks[] | select(. as $h | $existingHooks | index($h) == null) ])
+  ' "$dst" "$src" > "$dst.tmp" && mv "$dst.tmp" "$dst"
+  success "Merged → .claude/settings.json"
+}
+
+append_js_claudeignore() {
+  local ignore_file="$TARGET/.claudeignore"
+  [[ -f "$ignore_file" ]] || return
+  grep -q '^node_modules/$' "$ignore_file" && return
+  cat >> "$ignore_file" << 'EOF'
+
+# generated / vendored (JS/TS)
+node_modules/
+.pnp/
+.next/
+.expo/
+.turbo/
+*.tsbuildinfo
+
+# lockfiles (agent must not read, not edit)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+EOF
+  success "Appended JS/TS entries → .claudeignore"
+}
+
+# --------------- install .mcp.json --------------------------------------------
+
+render_template() {
+  local src="$1" dst="$2"
+  sed -e "s#{{MEMORY_FILE_PATH}}#${MEMORY_FILE_PATH//\//\\/}#g" \
+      -e "s#{{SUPABASE_PROJECT_REF}}#${SUPABASE_PROJECT_REF}#g" \
+      "$src" > "$dst"
+}
+
+install_mcp() {
+  echo ""
+  info "─── Installing .mcp.json ───"
+
+  if [[ -z "$MCP_MODE" ]]; then
+    read -rp "$(echo -e "${BOLD}Add the standard MCP server set to .mcp.json? (all/none): ${RESET}")" MCP_MODE
+  fi
+
+  if [[ "$MCP_MODE" == "none" ]]; then
+    info "Skipping MCP server setup."
+    return
+  fi
+
+  local project_name; project_name="$(basename "$TARGET")"
+  MEMORY_FILE_PATH="$HOME/.claude/mcp-memory/${project_name}.json"
+  mkdir -p "$(dirname "$MEMORY_FILE_PATH")"
+
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' RETURN
+
+  local include_supabase="n"
+  if [[ -n "$SUPABASE_PROJECT_REF" ]]; then
+    include_supabase="y"
+  else
+    read -rp "$(echo -e "${BOLD}Does this project use Supabase? Add the Supabase MCP server? (y/n): ${RESET}")" include_supabase
+    if [[ "$include_supabase" =~ ^[Yy] ]]; then
+      read -rp "$(echo -e "${BOLD}Supabase project ref: ${RESET}")" SUPABASE_PROJECT_REF
+    fi
+  fi
+
+  render_template "$STANDARDS_DIR/general/mcp/mcp.json" "$tmp_dir/mcp.json"
+
+  local server_names=(codegraphcontext playwright git tree-sitter memory sequential-thinking)
+
+  if [[ "$include_supabase" =~ ^[Yy] && -n "$SUPABASE_PROJECT_REF" ]]; then
+    render_template "$STANDARDS_DIR/general/mcp/mcp.supabase.json" "$tmp_dir/mcp.supabase.json"
+    server_names+=(supabase)
+  fi
+
+  local dst="$TARGET/.mcp.json"
+
+  if [[ ! -f "$dst" ]]; then
+    if [[ -f "$tmp_dir/mcp.supabase.json" ]] && command -v jq &> /dev/null; then
+      jq -s '.[0] * .[1]' "$tmp_dir/mcp.json" "$tmp_dir/mcp.supabase.json" > "$dst"
+    else
+      cp "$tmp_dir/mcp.json" "$dst"
+    fi
+    success "Created → .mcp.json"
+  elif command -v jq &> /dev/null; then
+    local merge_src="$tmp_dir/mcp.json"
+    if [[ -f "$tmp_dir/mcp.supabase.json" ]]; then
+      jq -s '.[0] * .[1]' "$tmp_dir/mcp.json" "$tmp_dir/mcp.supabase.json" > "$tmp_dir/mcp.merged.json"
+      merge_src="$tmp_dir/mcp.merged.json"
+    fi
+    # New servers only fill in missing keys — an existing server config always wins.
+    jq -s '.[1].mcpServers as $new | .[0] | .mcpServers = ($new + .mcpServers)' \
+      "$dst" "$merge_src" > "$dst.tmp" && mv "$dst.tmp" "$dst"
+    success "Merged → .mcp.json (existing server entries were kept as-is)"
+  else
+    warn ".mcp.json already exists and jq is not installed — skipping merge."
+    warn "Merge $tmp_dir/mcp.json into $dst by hand."
+    return
+  fi
+
+  local settings_local="$TARGET/.claude/settings.local.json"
+  mkdir -p "$(dirname "$settings_local")"
+  if command -v jq &> /dev/null; then
+    local names_json; names_json="$(printf '%s\n' "${server_names[@]}" | jq -R . | jq -s .)"
+    if [[ -f "$settings_local" ]]; then
+      jq --argjson new "$names_json" \
+        '.enabledMcpjsonServers = ((.enabledMcpjsonServers // []) + $new | unique)' \
+        "$settings_local" > "$settings_local.tmp" && mv "$settings_local.tmp" "$settings_local"
+    else
+      jq -n --argjson new "$names_json" '{enabledMcpjsonServers: $new}' > "$settings_local"
+    fi
+    success "Updated → .claude/settings.local.json (enabledMcpjsonServers)"
+  else
+    warn "jq is not installed — add these servers to .claude/settings.local.json's enabledMcpjsonServers by hand:"
+    printf '    %s\n' "${server_names[@]}"
   fi
 }
 
@@ -239,23 +439,11 @@ install_copilot() {
   local ignore_file="$TARGET/.claudeignore"
   if [[ ! -f "$ignore_file" ]]; then
     cat > "$ignore_file" << 'EOF'
-# generated / vendored
-node_modules/
-.pnp/
+# generated / vendored build output
 dist/
 build/
 out/
-.next/
-.expo/
-.turbo/
 coverage/
-*.tsbuildinfo
-
-# lockfiles
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-bun.lockb
 
 # binaries / media
 *.png
@@ -288,13 +476,15 @@ EOF
 
 # --------------- run ---------------------------------------------------------
 
-setup_cgc
+install_mcp_tool_deps
 
 case "$AI_TOOLS" in
-  claude)  install_claude ;;
+  claude)  install_claude; [[ "$IS_JS" =~ ^[Yy] ]] && install_javascript; install_mcp ;;
   copilot) install_copilot ;;
-  both)    install_claude; install_copilot ;;
+  both)    install_claude; [[ "$IS_JS" =~ ^[Yy] ]] && install_javascript; install_mcp; install_copilot ;;
 esac
+
+[[ "$IS_JS" =~ ^[Yy] ]] && append_js_claudeignore
 
 echo ""
 echo -e "${BOLD}━━━ Token-reducing rules & tools (already included in files above) ━━━${RESET}"

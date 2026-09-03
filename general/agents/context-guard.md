@@ -27,7 +27,7 @@ When given a large build log, test output, or linter report:
 ### 2. .claudeignore / .gitignore auditing
 If asked to audit the workspace:
 - Check `.claudeignore` (or equivalent).
-- Ensure `node_modules`, `dist`, `coverage`, lockfiles, and binaries are aggressively ignored.
+- Ensure the language's dependency/build directories (e.g. `node_modules`, `vendor`, `target`, `.venv`), `dist`, `coverage`, lockfiles, and binaries are aggressively ignored.
 - Identify large generated files (e.g., GraphQL schemas, migration snapshots) that shouldn't be read in full by default. Add them to the ignore lists.
 
 ### 3. Sub-agent scope enforcement

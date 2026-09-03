@@ -74,8 +74,9 @@ Don't reopen these from first principles every time; verify they still hold:
 - [ ] Who maintains it, how often, and for how long has it existed.
 - [ ] Is it actually needed? A three-line dependency is supply-chain surface
       for the rest of the project's life.
-- [ ] The dependency audit tool (`npm audit`, `pnpm audit`, etc.) stays clean
-      at the project's chosen severity threshold.
+- [ ] The dependency audit tool for this stack (`npm audit`, `pnpm audit`,
+      `pip-audit`, `cargo audit`, etc.) stays clean at the project's chosen
+      severity threshold.
 
 **Client app permissions / deep links**
 

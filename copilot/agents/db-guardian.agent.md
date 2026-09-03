@@ -14,6 +14,13 @@ the wrong amount. There's no "we'll patch it later" here — a migration
 already applied in production doesn't get edited, only corrected by another
 one.
 
+This agent assumes a Postgres-style row-level-security model. If the
+project's database doesn't support RLS, swap every "row-level security" /
+"policy" reference below for whatever actually enforces per-row
+authorization in that database (application-layer scoping, a view, a
+stored procedure with its own privilege check) — the underlying rule
+(authorization enforced at the layer the client can't bypass) still holds.
+
 ## Before writing
 
 Read this project's ADRs or design notes on authorization and state-machine

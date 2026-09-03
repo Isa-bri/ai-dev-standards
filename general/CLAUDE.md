@@ -178,23 +178,11 @@ A `.claudeignore` (same syntax as `.gitignore`) tells Claude which paths it
 must never read. Create one at the repo root and seed it with:
 
 ```
-# generated / vendored
-node_modules/
-.pnp/
+# generated / vendored build output
 dist/
 build/
 out/
-.next/
-.expo/
-.turbo/
 coverage/
-*.tsbuildinfo
-
-# lockfiles (agent must not read, not edit)
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-bun.lockb
 
 # binary / media assets
 *.png
@@ -223,7 +211,11 @@ bun.lockb
 ```
 
 Extend this list with any generated schema files, migration snapshots, or
-large fixture directories specific to this project.
+large fixture directories specific to this project. If the project is
+JS/TypeScript, also append the lockfile/`node_modules`/bundler-cache
+entries from `javascript/README.md` in the ai-dev-standards source repo —
+they're ecosystem-specific, not universal, so they live there instead of
+in this generic list.
 
 ### Code Graph Context (CGC) — symbol-level retrieval via MCP
 

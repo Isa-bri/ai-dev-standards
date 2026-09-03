@@ -171,10 +171,12 @@ Only load rules when matching files are active.
 
 Configure Content Exclusion in GitHub Enterprise / Org settings to globally
 block Copilot from seeing large or sensitive paths:
-- `node_modules/**`, `dist/**`, `build/**`
-- `*.lock`, `*.lockb`
-- `**/*.snap`, `**/*.tsbuildinfo`
+- `dist/**`, `build/**`, `coverage/**`
+- `**/*.snap`
 - Media assets, fonts, and binaries
+- If JS/TypeScript: `node_modules/**`, `*.lock`, `*.lockb`,
+  `**/*.tsbuildinfo` too (see `javascript/README.md` in the ai-dev-standards
+  source repo)
 
 ### Extreme Budget Minmaxing (IDE Behavior)
 
