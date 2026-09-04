@@ -102,7 +102,7 @@ else.
   of these are language-agnostic.
   | Server                | Purpose                                                         | Needs input?                                         | Needs a separate install?                          |
   | --------------------- | --------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------- |
-  | `codegraphcontext`    | Code graph queries ("who calls this") instead of raw file reads | No                                                   | Yes — `cgc` CLI (`npm i -g @codegraphcontext/cli`) |
+  | `codegraphcontext`    | Code graph queries ("who calls this") instead of raw file reads | No                                                   | Yes — `cgc` CLI (`pipx install codegraphcontext`) + Neo4j |
   | `playwright`          | Browser automation / E2E from the agent                         | No                                                   | No — runs via `npx` on first use                   |
   | `git`                 | Git operations as MCP tools instead of shelling out             | No                                                   | No — runs via `npx` on first use                   |
   | `tree-sitter`         | Symbol-level source parsing across languages                    | No                                                   | Yes — `pipx install mcp-server-tree-sitter`        |
@@ -225,8 +225,17 @@ The two scripts are behavior-for-behavior equivalents (same flags, same
 prompts, same merge semantics) — the PowerShell version merges JSON natively
 (`ConvertFrom-Json`/`ConvertTo-Json`) instead of needing `jq` on `PATH`.
 
-Any flag left out is prompted for interactively. For `claude`/`both`, the
-scripts:
+Any flag left out is prompted for interactively — **unless stdin isn't a
+terminal** (CI, a piped invocation, an AI agent running the script). In that
+case each unanswered prompt logs the fact and takes its default rather than
+reading EOF and aborting the run half-configured. The defaults are
+`-t general`, `-a claude`, `--mcp all`, `--install-cgc n`,
+`--install-mcp-tools n`, no Supabase, and `--js` inferred from whether the
+target has a `package.json`. Pass the flags explicitly when you care.
+
+Both scripts always write a `.claudeignore`, whichever agent you install.
+
+For `claude`/`both`, the scripts:
 
 - copy `CLAUDE.md` and `.claude/agents/*.md` (appending to `CLAUDE.md` with
   an `<!-- APPENDED BY AI DEV STANDARDS -->` marker if one already exists);
@@ -240,9 +249,14 @@ scripts:
   hand-edited server config is never clobbered — and syncs
   `enabledMcpjsonServers` in `.claude/settings.local.json`. Same `jq`
   requirement/fallback (bash) as above;
-- installs/indexes Code Graph Context and, optionally, runs
-  `pipx install mcp-server-tree-sitter` for the tree-sitter MCP server. The
-  remaining `npx`-based servers (`playwright`, `git`, `memory`,
+- with `--install-cgc y`, install Code Graph Context (`pipx install
+  codegraphcontext`, falling back to `pip --user`; it is a **Python** package,
+  not an npm one) and then index the repo and register its MCP server. Both of
+  those last two steps need a running Neo4j — if either fails the script warns
+  and carries on rather than aborting the setup, so re-run
+  `cgc neo4j setup && cgc index && cgc mcp setup` once Neo4j is up;
+- optionally run `pipx install mcp-server-tree-sitter` for the tree-sitter MCP
+  server. The remaining `npx`-based servers (`playwright`, `git`, `memory`,
   `sequential-thinking`) need no separate install — Claude Code fetches them
   on first connection.
 

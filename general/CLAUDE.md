@@ -227,7 +227,8 @@ tokens consumed compared with file-level or grep-level retrieval.
 **Setup (one-time per machine):**
 
 ```bash
-npm install -g @codegraphcontext/cli    # or: brew install cgc
+pipx install codegraphcontext           # Python package; the CLI is `cgc`
+cgc neo4j setup                         # one-time: CGC stores the graph in Neo4j
 cgc index                               # index the current repo
 cgc mcp setup                           # registers the MCP server in ~/.claude.json
 ```

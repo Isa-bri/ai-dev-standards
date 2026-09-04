@@ -67,13 +67,30 @@ function Write-Info    { param([string]$Message) Write-Host "[info]  $Message" -
 function Write-Success { param([string]$Message) Write-Host "[done]  $Message" -ForegroundColor Green }
 function Write-Warn    { param([string]$Message) Write-Host "[warn]  $Message" -ForegroundColor Yellow }
 
+# Every prompt routes through these two. When the host is non-interactive
+# (CI, a piped script, an AI agent running this), Read-Host would either throw
+# or block forever, and $ErrorActionPreference = "Stop" would abort the run
+# partway through with a half-configured repo. In that case each prompt logs
+# and takes its documented default instead.
+$script:Interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+
 function Read-YesNo {
-    param([string]$Prompt)
-    return Read-Host $Prompt
+    param([string]$Prompt, [string]$Default = "n")
+    if (-not $script:Interactive) {
+        Write-Info "Non-interactive host -- defaulting to '$Default': $Prompt"
+        return $Default
+    }
+    $reply = Read-Host $Prompt
+    if ([string]::IsNullOrWhiteSpace($reply)) { return $Default }
+    return $reply
 }
 
 function Select-Option {
-    param([string]$Prompt, [string[]]$Options)
+    param([string]$Prompt, [string]$Default, [string[]]$Options)
+    if (-not $script:Interactive) {
+        Write-Info "Non-interactive host -- defaulting to '$Default': $Prompt"
+        return $Default
+    }
     Write-Host $Prompt -ForegroundColor White
     for ($i = 0; $i -lt $Options.Length; $i++) {
         Write-Host "  $($i + 1)) $($Options[$i])"
@@ -117,7 +134,7 @@ Write-Host ""
 # --------------- project type & AI tooling -----------------------------------
 
 if (-not $Type) {
-    $choice = Select-Option "What type of project is this?" @(
+    $choice = Select-Option "What type of project is this?" "general" @(
         "general  (no platform-specific rules)",
         "web      (pnpm workspaces / Tailwind)",
         "mobile   (React Native / Expo)"
@@ -126,7 +143,7 @@ if (-not $Type) {
 }
 
 if (-not $Agent) {
-    $choice = Select-Option "Which AI tool(s) do you want to configure?" @(
+    $choice = Select-Option "Which AI tool(s) do you want to configure?" "claude" @(
         "claude   (Claude Code -- copies CLAUDE.md + .claude/agents/)",
         "copilot  (GitHub Copilot -- copies .github/copilot-instructions.md + agents)",
         "both     (install both)"
@@ -134,8 +151,10 @@ if (-not $Agent) {
     $Agent = $choice.Split(" ")[0]
 }
 
+# Default to detecting it rather than guessing: a package.json is the whole test.
 if (-not $Js) {
-    $Js = Read-YesNo "Is this a Node/pnpm (JS or TypeScript) project? (y/n)"
+    $jsDefault = if (Test-Path -LiteralPath (Join-Path $Target "package.json")) { "y" } else { "n" }
+    $Js = Read-YesNo "Is this a Node/pnpm (JS or TypeScript) project? (y/n)" $jsDefault
 }
 
 # --------------- copy / append functions --------------------------------------
@@ -171,32 +190,66 @@ function Copy-Dir {
 
 # --------------- OS and MCP tool dependency install ----------------------------
 
+# CodeGraphContext is a *Python* package: PyPI `codegraphcontext`, CLI `cgc`.
+# It has never been published to npm -- the old `npm i -g @codegraphcontext/cli`
+# here 404'd and, with $ErrorActionPreference = "Stop", killed the whole setup
+# run before any file was written.
+function Install-Cgc {
+    if (Get-Command cgc -ErrorAction SilentlyContinue) {
+        Write-Info "cgc is already on PATH -- skipping install."
+    } elseif (Get-Command pipx -ErrorAction SilentlyContinue) {
+        Write-Info "Installing codegraphcontext via pipx..."
+        try { pipx install codegraphcontext } catch {
+            Write-Warn "pipx install failed -- skipping CGC setup. Install it by hand with:"
+            Write-Warn "  pipx install codegraphcontext"
+            return
+        }
+    } elseif (Get-Command pip -ErrorAction SilentlyContinue) {
+        Write-Info "pipx not found -- installing codegraphcontext with pip --user..."
+        try { pip install --user codegraphcontext } catch {
+            Write-Warn "pip install failed -- skipping CGC setup."
+            return
+        }
+    } else {
+        Write-Warn "CodeGraphContext needs Python (pipx or pip) and neither was found."
+        Write-Warn "Install it later with: pipx install codegraphcontext"
+        return
+    }
+
+    if (-not (Get-Command cgc -ErrorAction SilentlyContinue)) {
+        Write-Warn "Installed, but 'cgc' is not on PATH yet -- open a new shell, then run:"
+        Write-Warn "  cd '$Target'; cgc index; cgc mcp setup"
+        return
+    }
+
+    # Indexing needs a running Neo4j (see 'cgc neo4j setup'). Neither step is
+    # allowed to abort the setup run: the config files matter more than the
+    # index, and both are safe to re-run later.
+    Write-Info "Indexing target repository ($Target)..."
+    Push-Location $Target
+    try { cgc index } catch {
+        Write-Warn "cgc index failed (is Neo4j running? try 'cgc neo4j setup') -- continuing."
+    } finally { Pop-Location }
+
+    Write-Info "Setting up MCP server..."
+    try { cgc mcp setup } catch {
+        Write-Warn "cgc mcp setup failed -- run it by hand later. Continuing."
+    }
+
+    Write-Success "CGC installed and configured."
+}
+
 function Install-McpToolDeps {
     Write-Host ""
     Write-Info "--- Token Optimization Setup ---"
     Write-Info "Detected OS: Windows"
 
-    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-        Write-Warn "npm is not installed. Code Graph Context (CGC) requires Node.js."
-        return
-    }
-
     if (-not $script:InstallCgc) {
-        $script:InstallCgc = Read-YesNo "Do you want to install Code Graph Context (CGC) for extreme token optimization? (y/n)"
+        $script:InstallCgc = Read-YesNo "Do you want to install Code Graph Context (CGC) for extreme token optimization? (y/n)" "n"
     }
 
     if (Test-YesTrue $script:InstallCgc) {
-        Write-Info "Installing @codegraphcontext/cli globally..."
-        npm install -g @codegraphcontext/cli
-
-        Write-Info "Indexing target repository ($Target)..."
-        Push-Location $Target
-        try { cgc index } finally { Pop-Location }
-
-        Write-Info "Setting up MCP server..."
-        cgc mcp setup
-
-        Write-Success "CGC Installed and configured."
+        Install-Cgc
     } else {
         Write-Info "Skipping CGC installation."
     }
@@ -204,7 +257,7 @@ function Install-McpToolDeps {
     if ($script:Mcp -eq "none") { return }
 
     if (-not $script:InstallMcpTools) {
-        $script:InstallMcpTools = Read-YesNo "Install the tree-sitter MCP server's CLI dependency via pipx now? (y/n)"
+        $script:InstallMcpTools = Read-YesNo "Install the tree-sitter MCP server's CLI dependency via pipx now? (y/n)" "n"
     }
 
     if (Test-YesTrue $script:InstallMcpTools) {
@@ -343,7 +396,7 @@ function Install-Mcp {
     Write-Info "--- Installing .mcp.json ---"
 
     if (-not $script:Mcp) {
-        $script:Mcp = Read-YesNo "Add the standard MCP server set to .mcp.json? (all/none)"
+        $script:Mcp = Read-YesNo "Add the standard MCP server set to .mcp.json? (all/none)" "all"
     }
 
     if ($script:Mcp -eq "none") {
@@ -363,9 +416,11 @@ function Install-Mcp {
         if ($script:SupabaseProjectRef) {
             $includeSupabase = "y"
         } else {
-            $includeSupabase = Read-YesNo "Does this project use Supabase? Add the Supabase MCP server? (y/n)"
+            # Non-interactively this answers "n": -SupabaseProjectRef is the only
+            # way to opt in without a console, and it was already checked above.
+            $includeSupabase = Read-YesNo "Does this project use Supabase? Add the Supabase MCP server? (y/n)" "n"
             if (Test-YesTrue $includeSupabase) {
-                $script:SupabaseProjectRef = Read-Host "Supabase project ref"
+                $script:SupabaseProjectRef = Read-YesNo "Supabase project ref" ""
             }
         }
 
@@ -435,7 +490,14 @@ function Install-Copilot {
     if ($Type -eq "web") {
         Copy-OrAppend-File -Src (Join-Path $StandardsDir "copilot/instructions/web.instructions.md") -Dst (Join-Path $Target ".github/instructions/web.instructions.md")
     }
+}
 
+# --------------- generate .claudeignore -----------------------------------------
+
+# Claude Code reads .claudeignore, Copilot does not -- this used to live at the
+# end of Install-Copilot, so -Agent claude (the common case) silently never got
+# one. It belongs to every install path.
+function New-ClaudeIgnore {
     Write-Host ""
     Write-Info "--- Generating .claudeignore ---"
     $ignoreFile = Join-Path $Target ".claudeignore"
@@ -496,6 +558,8 @@ switch ($Agent) {
         Install-Copilot
     }
 }
+
+New-ClaudeIgnore
 
 if (Test-YesTrue $Js) { Add-JsClaudeIgnore }
 

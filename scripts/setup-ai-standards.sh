@@ -42,18 +42,41 @@ info()    { echo -e "${CYAN}[info]${RESET}  $*"; }
 success() { echo -e "${GREEN}[done]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[warn]${RESET}  $*"; }
 
+# Every prompt below routes through `ask`/`pick`. When stdin is not a TTY —
+# CI, `curl | bash`, or an AI agent running the script — reading would hit EOF
+# and `set -e` would abort the run partway through, leaving a half-configured
+# repo. In that case each prompt logs and takes its documented default
+# instead, so a fully-flagged non-interactive invocation never blocks and a
+# partially-flagged one still completes.
+INTERACTIVE=1
+[[ -t 0 ]] || INTERACTIVE=0
+
+# ask <varname> <default> <prompt text>
 ask() {
-  local prompt="$1" varname="$2"
-  read -rp "$(echo -e "${BOLD}${prompt}${RESET} ")" "$varname"
+  local varname="$1" default="$2" prompt="$3" reply
+  if (( ! INTERACTIVE )); then
+    printf -v "$varname" '%s' "$default"
+    info "Non-interactive stdin — defaulting to '${default}': ${prompt}"
+    return
+  fi
+  read -rp "$(echo -e "${BOLD}${prompt}${RESET} ")" reply
+  printf -v "$varname" '%s' "${reply:-$default}"
 }
 
+# pick <prompt text> <default> <option>...
+# The menu goes to stderr: this function's stdout is the caller's answer.
 pick() {
-  local prompt="$1"; shift
+  local prompt="$1" default="$2"; shift 2
   local options=("$@")
-  echo -e "${BOLD}${prompt}${RESET}"
+  if (( ! INTERACTIVE )); then
+    info "Non-interactive stdin — defaulting to '${default}': ${prompt}" >&2
+    echo "$default"
+    return
+  fi
+  echo -e "${BOLD}${prompt}${RESET}" >&2
   local i=1
   for opt in "${options[@]}"; do
-    echo "  $i) $opt"
+    echo "  $i) $opt" >&2
     ((i++))
   done
   local choice
@@ -63,7 +86,7 @@ pick() {
       echo "${options[$((choice-1))]}"
       return
     fi
-    warn "Please enter a number between 1 and ${#options[@]}."
+    warn "Please enter a number between 1 and ${#options[@]}." >&2
   done
 }
 
@@ -129,7 +152,7 @@ echo ""
 # --------------- project type & AI tooling -----------------------------------
 
 if [[ -z "$PROJECT_TYPE" ]]; then
-  PROJECT_TYPE="$(pick "What type of project is this?" \
+  PROJECT_TYPE="$(pick "What type of project is this?" "general" \
     "general  (no platform-specific rules)" \
     "web      (pnpm workspaces / Tailwind)" \
     "mobile   (React Native / Expo)")"
@@ -137,15 +160,17 @@ if [[ -z "$PROJECT_TYPE" ]]; then
 fi
 
 if [[ -z "$AI_TOOLS" ]]; then
-  AI_TOOLS="$(pick "Which AI tool(s) do you want to configure?" \
+  AI_TOOLS="$(pick "Which AI tool(s) do you want to configure?" "claude" \
     "claude   (Claude Code — copies CLAUDE.md + .claude/agents/)" \
     "copilot  (GitHub Copilot — copies .github/copilot-instructions.md + agents)" \
     "both     (install both)")"
   AI_TOOLS="${AI_TOOLS%% *}"
 fi
 
+# Default to detecting it rather than guessing: a package.json is the whole test.
 if [[ -z "$IS_JS" ]]; then
-  read -rp "$(echo -e "${BOLD}Is this a Node/pnpm (JS or TypeScript) project? (y/n): ${RESET}")" IS_JS
+  js_default="n"; [[ -f "$TARGET/package.json" ]] && js_default="y"
+  ask IS_JS "$js_default" "Is this a Node/pnpm (JS or TypeScript) project? (y/n):"
 fi
 
 # --------------- copy / append functions -------------------------------------
@@ -178,6 +203,52 @@ copy_dir() {
 
 # --------------- OS and MCP tool dependency install ---------------------------
 
+# CodeGraphContext is a **Python** package: PyPI `codegraphcontext`, CLI `cgc`.
+# It has never been published to npm — the old `npm i -g @codegraphcontext/cli`
+# here 404'd and, under `set -e`, killed the whole setup run before any file
+# was written.
+install_cgc() {
+  if command -v cgc &> /dev/null; then
+    info "cgc is already on PATH — skipping install."
+  elif command -v pipx &> /dev/null; then
+    info "Installing codegraphcontext via pipx..."
+    if ! pipx install codegraphcontext; then
+      warn "pipx install failed — skipping CGC setup. Install it by hand with:"
+      warn "  pipx install codegraphcontext"
+      return
+    fi
+  elif command -v pip3 &> /dev/null || command -v pip &> /dev/null; then
+    local pip_cmd; pip_cmd="$(command -v pip3 || command -v pip)"
+    info "pipx not found — installing codegraphcontext with $pip_cmd --user..."
+    if ! "$pip_cmd" install --user codegraphcontext; then
+      warn "pip install failed — skipping CGC setup."
+      return
+    fi
+  else
+    warn "CodeGraphContext needs Python (pipx or pip) and neither was found."
+    warn "Install it later with: pipx install codegraphcontext"
+    return
+  fi
+
+  if ! command -v cgc &> /dev/null; then
+    warn "Installed, but 'cgc' is not on PATH yet — add ~/.local/bin to PATH,"
+    warn "then run: cd '$TARGET' && cgc index && cgc mcp setup"
+    return
+  fi
+
+  # Indexing needs a running Neo4j (see 'cgc neo4j setup'). Neither step is
+  # allowed to abort the setup run: the config files matter more than the index,
+  # and both are safe to re-run later.
+  info "Indexing target repository ($TARGET)..."
+  (cd "$TARGET" && cgc index) \
+    || warn "cgc index failed (is Neo4j running? try 'cgc neo4j setup') — continuing."
+
+  info "Setting up MCP server..."
+  cgc mcp setup || warn "cgc mcp setup failed — run it by hand later. Continuing."
+
+  success "CGC installed and configured."
+}
+
 install_mcp_tool_deps() {
   echo ""
   info "─── Token Optimization Setup ───"
@@ -186,26 +257,12 @@ install_mcp_tool_deps() {
   OS="$(uname -s)"
   info "Detected OS: $OS"
 
-  if ! command -v npm &> /dev/null; then
-    warn "npm is not installed. Code Graph Context (CGC) requires Node.js."
-    return
-  fi
-
   if [[ -z "$INSTALL_CGC" ]]; then
-    read -rp "$(echo -e "${BOLD}Do you want to install Code Graph Context (CGC) for extreme token optimization? (y/n): ${RESET}")" INSTALL_CGC
+    ask INSTALL_CGC "n" "Do you want to install Code Graph Context (CGC) for extreme token optimization? (y/n):"
   fi
 
   if [[ "$INSTALL_CGC" =~ ^[Yy] ]]; then
-    info "Installing @codegraphcontext/cli globally..."
-    npm install -g @codegraphcontext/cli
-
-    info "Indexing target repository ($TARGET)..."
-    (cd "$TARGET" && cgc index)
-
-    info "Setting up MCP server..."
-    cgc mcp setup
-
-    success "CGC Installed and configured."
+    install_cgc
   else
     info "Skipping CGC installation."
   fi
@@ -218,7 +275,7 @@ install_mcp_tool_deps() {
   fi
 
   if [[ -z "$INSTALL_MCP_TOOLS" ]]; then
-    read -rp "$(echo -e "${BOLD}Install the tree-sitter MCP server's CLI dependency via pipx now? (y/n): ${RESET}")" INSTALL_MCP_TOOLS
+    ask INSTALL_MCP_TOOLS "n" "Install the tree-sitter MCP server's CLI dependency via pipx now? (y/n):"
   fi
 
   if [[ "$INSTALL_MCP_TOOLS" =~ ^[Yy] ]]; then
@@ -299,8 +356,15 @@ install_javascript() {
 
 append_js_claudeignore() {
   local ignore_file="$TARGET/.claudeignore"
-  [[ -f "$ignore_file" ]] || return
-  grep -q '^node_modules/$' "$ignore_file" && return
+  # `x || return` and `x && return` both propagate a non-zero status out of the
+  # function, which `set -e` turns into an aborted run. Spell the guards out.
+  if [[ ! -f "$ignore_file" ]]; then
+    return 0
+  fi
+  if grep -q '^node_modules/$' "$ignore_file"; then
+    info "JS/TS entries already present in .claudeignore — nothing to append."
+    return 0
+  fi
   cat >> "$ignore_file" << 'EOF'
 
 # generated / vendored (JS/TS)
@@ -334,7 +398,7 @@ install_mcp() {
   info "─── Installing .mcp.json ───"
 
   if [[ -z "$MCP_MODE" ]]; then
-    read -rp "$(echo -e "${BOLD}Add the standard MCP server set to .mcp.json? (all/none): ${RESET}")" MCP_MODE
+    ask MCP_MODE "all" "Add the standard MCP server set to .mcp.json? (all/none):"
   fi
 
   if [[ "$MCP_MODE" == "none" ]]; then
@@ -353,9 +417,11 @@ install_mcp() {
   if [[ -n "$SUPABASE_PROJECT_REF" ]]; then
     include_supabase="y"
   else
-    read -rp "$(echo -e "${BOLD}Does this project use Supabase? Add the Supabase MCP server? (y/n): ${RESET}")" include_supabase
+    # Non-interactively this answers "n": --supabase-project-ref is the only
+    # way to opt in without a TTY, and it was already checked above.
+    ask include_supabase "n" "Does this project use Supabase? Add the Supabase MCP server? (y/n):"
     if [[ "$include_supabase" =~ ^[Yy] ]]; then
-      read -rp "$(echo -e "${BOLD}Supabase project ref: ${RESET}")" SUPABASE_PROJECT_REF
+      ask SUPABASE_PROJECT_REF "" "Supabase project ref:"
     fi
   fi
 
@@ -433,7 +499,14 @@ install_copilot() {
     copy_or_append_file "$STANDARDS_DIR/copilot/instructions/web.instructions.md" \
               "$TARGET/.github/instructions/web.instructions.md"
   fi
+}
 
+# --------------- generate .claudeignore ---------------------------------------
+
+# Claude Code reads .claudeignore, Copilot does not — this used to live at the
+# end of install_copilot, so `-a claude` (the common case) silently never got
+# one. It belongs to every install path.
+generate_claudeignore() {
   echo ""
   info "─── Generating .claudeignore ───"
   local ignore_file="$TARGET/.claudeignore"
@@ -484,7 +557,8 @@ case "$AI_TOOLS" in
   both)    install_claude; [[ "$IS_JS" =~ ^[Yy] ]] && install_javascript; install_mcp; install_copilot ;;
 esac
 
-[[ "$IS_JS" =~ ^[Yy] ]] && append_js_claudeignore
+generate_claudeignore
+[[ "$IS_JS" =~ ^[Yy] ]] && append_js_claudeignore || true
 
 echo ""
 echo -e "${BOLD}━━━ Token-reducing rules & tools (already included in files above) ━━━${RESET}"
